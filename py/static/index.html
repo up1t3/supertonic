@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Алиса — Голосовой ИИ Собеседник</title>
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎙️</text></svg>">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-glow">
+        <div class="glow-sphere sphere-1"></div>
+        <div class="glow-sphere sphere-2"></div>
+    </div>
+
+    <div class="app-container">
+        <!-- Боковая панель настроек (Glassmorphism) -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fa-solid fa-sliders-h"></i> Конфигурация</h2>
+            </div>
+            
+            <div class="setting-group">
+                <label for="brain-select"><i class="fa-solid fa-brain"></i> Модель (Мозг)</label>
+                <select id="brain-select">
+                    <option value="vllm" selected>vLLM (Local, OpenAI)</option>
+                    <option value="lm-studio">LM Studio (Local, OpenAI)</option>
+                    <option value="ollama">Ollama (Local, API)</option>
+                    <option value="gemini">Gemini API (Cloud)</option>
+                    <option value="mock">Локальная заглушка</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <label for="mode-select"><i class="fa-solid fa-phone-volume"></i> Режим работы</label>
+                <select id="mode-select">
+                    <option value="walkie-talkie">Рация (По кнопке)</option>
+                    <option value="real-time" selected>Свободные руки (Real-Time)</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <label for="stt-select"><i class="fa-solid fa-microphone-lines"></i> Распознавание (STT)</label>
+                <select id="stt-select">
+                    <option value="faster-whisper" selected>Faster-Whisper (Локально)</option>
+                    <option value="browser">Web Speech API (Браузер)</option>
+                </select>
+            </div>
+
+            <div class="setting-group" id="api-url-group">
+                <label for="api-url-input"><i class="fa-solid fa-network-wired"></i> URL API Бэкенда</label>
+                <input type="text" id="api-url-input" value="http://localhost:8000/v1" placeholder="http://localhost:8000/v1">
+                <small class="help-text">Куда отправлять запросы ИИ</small>
+            </div>
+
+            <div class="setting-group">
+                <label for="voice-select"><i class="fa-solid fa-microphone-lines"></i> Голос (Supertonic)</label>
+                <select id="voice-select">
+                    <optgroup label="Женские голоса">
+                        <option value="F2" selected>Алиса (F2 - Рекомендуется)</option>
+                        <option value="F1">F1 (Дикторский)</option>
+                        <option value="F3">F3 (Информационный)</option>
+                        <option value="F4">F4 (Мягкий)</option>
+                        <option value="F5">F5 (Энергичный)</option>
+                    </optgroup>
+                    <optgroup label="Мужские голоса">
+                        <option value="M1">M1 (Стандартный)</option>
+                        <option value="M2">M2 (Глубокий)</option>
+                        <option value="M3">M3 (Научный)</option>
+                        <option value="M4">M4 (Игровой)</option>
+                        <option value="M5">M5 (Деловой)</option>
+                    </optgroup>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <label for="speed-range">
+                    <span><i class="fa-solid fa-gauge-high"></i> Скорость:</span>
+                    <span id="speed-val">1.15</span>
+                </label>
+                <input type="range" id="speed-range" min="0.8" max="1.5" step="0.05" value="1.15">
+                <small class="help-text">1.15 оптимально против растягивания гласных</small>
+            </div>
+
+            <div class="setting-group">
+                <label for="steps-range">
+                    <span><i class="fa-solid fa-wand-magic-sparkles"></i> Скорость синтеза (шаги):</span>
+                    <span id="steps-val">6</span>
+                </label>
+                <input type="range" id="steps-range" min="5" max="12" step="1" value="6">
+                <small class="help-text">6 шагов — идеальный баланс скорости и качества</small>
+            </div>
+
+            <div class="sidebar-footer">
+                <p>Supertonic TTS &bull; v1.2</p>
+            </div>
+        </aside>
+
+        <!-- Основная область интерфейса -->
+        <main class="main-content">
+            <header class="app-header">
+                <h1>Алиса <span class="badge">Live Voice</span></h1>
+                <div class="status-indicator">
+                    <span class="status-dot green"></span>
+                    <span id="status-text">Готов к общению</span>
+                </div>
+            </header>
+
+            <!-- Центральный элемент: Голосовой визуализатор -->
+            <section class="visualizer-section">
+                <div class="orb-container">
+                    <div class="orb-glow"></div>
+                    <button class="record-btn" id="record-btn" aria-label="Начать запись">
+                        <i class="fa-solid fa-microphone" id="mic-icon"></i>
+                    </button>
+                    <!-- Круговой визуализатор -->
+                    <canvas id="orb-waves" class="orb-waves"></canvas>
+                </div>
+                <div class="hint-text" id="hint-text">Нажмите на микрофон, чтобы начать разговор</div>
+            </section>
+
+            <!-- Окно диалога (Транскрипт) -->
+            <section class="chat-section">
+                <div class="chat-container" id="chat-container">
+                    <div class="message assistant">
+                        <div class="message-avatar"><i class="fa-solid fa-robot"></i></div>
+                        <div class="message-bubble">
+                            Привет! Я готова к живому общению. Поговори со мной!
+                        </div>
+                    </div>
+                </div>
+                <form class="chat-input-form" id="chat-input-form">
+                    <input type="text" id="chat-text-input" placeholder="Или напишите сообщение текстом..." autocomplete="off">
+                    <button type="submit" id="send-text-btn" aria-label="Отправить">
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </button>
+                </form>
+            </section>
+        </main>
+    </div>
+
+    <!-- Загрузка аудиоэлемента для проигрывания синтеза -->
+    <audio id="audio-player" style="display: none;"></audio>
+
+    <script src="app.js"></script>
+</body>
+</html>
