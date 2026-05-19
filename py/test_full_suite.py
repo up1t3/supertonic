@@ -70,8 +70,8 @@ def test_reduce_and_stress_word():
     # Тест односложного слова
     assert prep.reduce_and_stress_word("стол") == "стОл"
     
-    # Тест автоматической буквы Ё (зелёный -> зелЁный)
-    assert prep.reduce_and_stress_word("зелёный") == "зелЁный"
+    # Тест автоматической буквы Ё (зелёный -> зилЁный из-за редукции предударной Е->И)
+    assert prep.reduce_and_stress_word("зелёный") == "зилЁный"
     
     # Тест слова с ручным ударением через плюс
     assert prep.reduce_and_stress_word("зам+ок") == "замОк"
@@ -89,10 +89,10 @@ def test_apply_rules():
     
     # Тест сокращений
     res = prep.apply_rules("и т.д. и т.п.")
-    assert "дАлее" in res
+    assert "дАлие" in res
     assert "падОбнае" in res
     assert "рублЕй" in prep.apply_rules("100 руб.")
-    assert "тЫсяч" in prep.apply_rules("5 тыс.")
+    assert "тЫсич" in prep.apply_rules("5 тыс.")
     assert "миллиОнав" in prep.apply_rules("2 млн.")
     
     # Тест пустого текста
@@ -117,7 +117,7 @@ def test_preprocessor_homographs_and_morphology():
     # -ость -> скОрость, рАдость (суффикс безударный)
     assert "скОрасть" in prep.apply_rules("скорость")
     # -ение -> решЕние, движЕние
-    assert "решЕние" in prep.apply_rules("решение")
+    assert "ришЕние" in prep.apply_rules("решение")
     # -ировать -> блокировать
     assert "блакИравать" in prep.apply_rules("блокировать")
 
@@ -380,8 +380,8 @@ async def test_stream_from_ollama_success():
     """Тест асинхронного стриминга из Ollama."""
     async def mock_aiter_lines():
         lines = [
-            '{"response": "Оллама", "done": false}',
-            '{"response": " ответ", "done": true}'
+            '{"message": {"content": "Оллама"}, "done": false}',
+            '{"message": {"content": " ответ"}, "done": true}'
         ]
         for line in lines:
             yield line
@@ -400,9 +400,11 @@ async def test_stream_from_ollama_success():
     mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.stream.return_value = mock_stream_ctx
     
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with patch("httpx.AsyncClient", return_value=mock_client), \
+         patch("server.get_active_ollama_model", new_callable=AsyncMock) as mock_get_model:
+        mock_get_model.return_value = "llama3"
         tokens = []
-        async for token in server.stream_from_ollama("http://dummy", "Промпт"):
+        async for token in server.stream_from_ollama("http://dummy", [{"role": "user", "content": "Промпт"}]):
             tokens.append(token)
             
         assert "".join(tokens) == "Оллама ответ"
@@ -435,7 +437,7 @@ async def test_stream_from_gemini_success():
          patch("google.generativeai.configure") as mock_conf:
          
         tokens = []
-        async for token in server.stream_from_gemini("system", "prompt"):
+        async for token in server.stream_from_gemini([{"role": "system", "content": "system"}, {"role": "user", "content": "prompt"}]):
             tokens.append(token)
             
         assert "".join(tokens) == "Привет от Джемини"

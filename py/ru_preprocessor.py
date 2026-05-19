@@ -1,373 +1,148 @@
 import re
-
+from ruaccent import RUAccent
+import pymorphy3
+from num2words import num2words
 class RussianTTSPreprocessor:
     """
-    Улучшенный орфоэпический препроцессор для подготовки русского текста к генерации в Supertonic TTS.
-    Внедряет:
-    1. Автоматическое акцентирование гласных с поддержкой знака '+' (например, 'за+мок' -> 'зАмок').
-    2. Выделение односложных предлогов и союзов как безударных клитик (не получают ложных ударений).
-    3. Автоматическое ударение на букву 'Ё' (Ё всегда ударная).
-    4. Безударную качественную редукцию (О -> А в безударных слогах) для избавления от оканья.
-    5. Контекстный интеллектуальный анализатор омографов (замок, стоит, атлас, плачу, орган) по соседним словам.
-    6. Расширенный словарь сложных слов, омографов и профессиональных терминов.
-    7. Морфологические эвристики ударений для неизвестных слов (окончания -ировать, -ость, -ение, -ить).
+    Нейросетевой орфоэпический препроцессор для подготовки русского текста к генерации в Supertonic TTS.
+    Внедряет ML-акцентуацию с помощью библиотеки ruaccent.
+    
+    Архитектура обработки (Pipeline v2 — Audit-Driven):
+    1. Раскрытие сокращений (т.д., руб., и др.)
+    2. Очистка от markdown, иероглифов
+    3. ML-акцентуация через ruaccent (контекстная, с омографами)
+    4. Конвертация '+' → UPPERCASE гласная
+    5. [NEW] Замена Ё→Е (Supertonic 3 не поддерживает ё в unicode_indexer)
+    6. [NEW] Деакцентуация клитик (предлоги, частицы, союзы → lowercase)
+    7. Финальная очистка пробелов
     """
     
+    # Служебные слова русского языка, которые в естественной речи
+    # произносятся безударно (проклитики и энклитики).
+    # Их акцентуация создаёт эффект "чеканной" робото-речи.
+    CLITICS = frozenset({
+        # Предлоги
+        'в', 'к', 'с', 'у', 'о', 'на', 'по', 'за', 'из', 'до', 'от', 'об',
+        'во', 'ко', 'со', 'при', 'про', 'без', 'для', 'под', 'над', 'перед',
+        # Союзы
+        'и', 'а', 'но', 'да', 'то', 'что', 'как', 'или', 'ни',
+        # Частицы
+        'не', 'бы', 'же', 'ли', 'ведь', 'вот', 'уж', 'вон', 'ка', 'аж',
+        # Местоимения-клитики (безударные формы)
+        'я', 'мы', 'он', 'мне', 'его', 'её', 'их', 'ей', 'им', 'нас', 'вас',
+        # Связки и вспомогательные
+        'это', 'был', 'есть', 'так', 'уже', 'ещё', 'тут', 'там',
+    })
+    
     def __init__(self):
-        # 1. Список безударных клитик (предлоги, союзы, частицы), которые не должны получать ударение
-        self.clitics = {
-            "на", "в", "под", "за", "над", "об", "от", "из", "с", "к", "без", "для", 
-            "до", "при", "про", "через", "у", "не", "ни", "но", "а", "да", "и", "или", 
-            "бы", "ли", "же", "вы", "мы", "ты", "он", "она", "они", "обо", "ото", "изо"
-        }
+        print("[TTS Preprocessor] Инициализация нейросетевой модели ruaccent...")
+        self.accentizer = RUAccent()
+        # Загружаем модель для расстановки ударений. 'turbo3.1' - баланс скорости и качества
+        # use_dictionary=True использует встроенные словари ruaccent
+        # custom_dict исправляет системные ошибки ударений, выявленные при прослушивании
+        from business_dict import BUSINESS_ACCENT_DICT
+        self.accentizer.load(omograph_model_size='turbo3.1', use_dictionary=True, custom_dict=BUSINESS_ACCENT_DICT)
         
-        # 2. Интеллектуальные правила для омографов
-        self.homographs = {
-            "замок": {
-                "stressed_variants": {
-                    "lock": "замОк",
-                    "castle": "зАмок"
-                },
-                "contexts": {
-                    "lock": {"дверь", "двери", "ключ", "ключи", "открыть", "открыл", "закрыть", "закрыл", "повесить", "взломать", "петля", "скважина", "навесной", "сейф", "код"},
-                    "castle": {"король", "королева", "принцесса", "рыцарь", "дворец", "крепость", "старый", "каменный", "средневековый", "граф", "башня"}
-                },
-                "default": "зАмок"
-            },
-            "стоит": {
-                "stressed_variants": {
-                    "cost": "стОит",
-                    "stands": "стоИт"
-                },
-                "contexts": {
-                    "cost": {"цена", "рублей", "руб", "долларов", "евро", "копеек", "дорого", "дешево", "сколько", "купить", "продать", "ценность", "миллион", "тысяча"},
-                    "stands": {"человек", "дом", "на столе", "вертикально", "угол", "место", "очередь", "посреди", "шкаф", "памятник", "стоит"}
-                },
-                "default": "стоИт"
-            },
-            "атлас": {
-                "stressed_variants": {
-                    "maps": "Атлас",
-                    "fabric": "атлАс"
-                },
-                "contexts": {
-                    "maps": {"карта", "география", "мир", "дороги", "земля", "учебник", "контурный"},
-                    "fabric": {"ткань", "шелк", "платье", "рубашка", "лента", "блестящий", "материал"}
-                },
-                "default": "Атлас"
-            },
-            "плачу": {
-                "stressed_variants": {
-                    "pay": "плачУ",
-                    "cry": "плАчу"
-                },
-                "contexts": {
-                    "pay": {"деньги", "карта", "счет", "касса", "покупка", "налог", "аренда", "терминал", "чек", "кассир", "платить"},
-                    "cry": {"слезы", "грустно", "обида", "горе", "боль", "плакать", "печально", "рыдать"}
-                },
-                "default": "плачУ"
-            },
-            "орган": {
-                "stressed_variants": {
-                    "instrument": "оргАн",
-                    "body_part": "Орган"
-                },
-                "contexts": {
-                    "instrument": {"музыка", "собор", "играть", "звук", "клавиши", "церковь", "трубы", "бабах"},
-                    "body_part": {"тело", "сердце", "печень", "человек", "биология", "чувств", "зрение", "слух", "внутренний"}
-                },
-                "default": "Орган"
-            }
-        }
+        print("[TTS Preprocessor] Инициализация морфологического анализатора...")
+        self.morph = pymorphy3.MorphAnalyzer()
+        print("[TTS Preprocessor] Модели успешно загружены.")
+
+    def _deaccentuate_clitics(self, text: str) -> str:
+        """
+        Убирает ударения (uppercase гласные) у служебных слов.
+        Это создаёт естественную просодию, где предлоги и частицы
+        произносятся слитно с соседним словом, без паразитного акцента.
         
-        # 3. Расширенный орфоэпический словарь для голосового ассистента Алисы
-        self.stress_db = {
-            # Базовые приветствия и команды
-            "привет": "привЕт",
-            "алиса": "алИса",
-            "велосипед": "веласипЕд",
-            "велосипеде": "веласипЕде",
-            "велосипеда": "веласипЕда",
-            "скорость": "скОрасть",
-            "скорости": "скОрасти",
-            "среднюю": "срЕднюю",
-            "тридцать": "трИдцать",
-            "километров": "киламЕтрав",
-            "конечно": "канЕшна", 
-            "почему": "пачимУ",
-            "столе": "сталЕ",
-            "стол": "стОл",
-            "положил": "палажИл",
-            "хорошо": "харашО",
-            "спасибо": "спасИба",
-            "пожалуйста": "пажАлуста", 
-            "очень": "Очинь",
-            "приятно": "приЯтна",
-            "было": "бЫла",
-            "умею": "умЕю",
-            "делать": "дЕлать",
-            "могу": "магУ",
-            "помочь": "памОчь",
-            "сегодня": "сигОдня", 
-            "завтра": "зАвтра",
-            "вчера": "фчирА",
-            "сейчас": "сейчАс",
-            "время": "врЕмя",
-            "day": "дЕнь", # Избегаем английских наложений
-            "день": "дЕнь",
-            "ночь": "нОчь",
-            "вечер": "вЕчир",
-            "утро": "Утра",
-            "работать": "рабОтать",
-            "запустить": "запустИть",
-            "локально": "лакАльна",
-            "быстро": "бЫстра",
-            "качественно": "кАчиствинна",
-            "ответ": "атвЕт",
-            "вопрос": "вапрОс",
-            "компьютер": "кампьЮтир",
-            "программа": "прагрАмма",
-            "код": "кОд",
-            "антигравитация": "антигравитАция",
-            "собеседник": "сабисЕдник",
-            "разговор": "разгавОр",
-            "поговорим": "пагаварИм",
-            "дела": "дилА",
-            "как": "кАк",
-            "твои": "тваИ",
-            "меня": "миня",
-            "зовут": "завУт",
-            "тебя": "тибЯ",
-            "рада": "рАда",
-            "слышать": "слЫшать",
-            "пообщаться": "паапщАться",
-            "до": "дО",
-            "свидания": "свидАния",
-            "отлично": "атлИчна",
-            "успехи": "успЕхи",
-            "активного": "актИвнава",
-            "подключения": "патключЕния",
-            "просто": "прОста",
-            "поболтаем": "пабалтАим",
-            "простом": "прастОм",
-            "готовая": "гатОвая",
-            "закрыта": "закрЫта",
-            "огромный": "агрОмный",
-            "дверь": "двЕрь",
-            "купил": "купИл",
-            "звонит": "званИт",
-            "договор": "дагавОр",
-            "обеспечение": "абеспЕчение",
-            "торты": "тОрты",
-            "торт": "тОрт",
-            "водопровод": "вадаправОд",
-            "каталог": "каталаОг",
-            "квартал": "квартАл",
-            "облегчить": "аблигчИть",
-            "сливовый": "слИвавый",
-            "кухонный": "кУханный",
-            "жалюзи": "жалюзИ",
-            "красивее": "красИвие",
-            "баловать": "балавАть",
-            "искра": "Искра",
-            "включит": "включИт",
-            "включен": "включЕн",
-            "занята": "занятА",
-            "занято": "зАнята",
-            "заняты": "зАняты",
+        Пример: 'нА столЕ' → 'на столЕ' (предлог 'на' теряет ударение)
+        """
+        words = text.split()
+        result = []
+        for word in words:
+            # Проверяем, является ли слово в lowercase-форме клитикой
+            word_lower = word.lower()
+            # Убираем возможные trailing пунктуации для проверки
+            word_clean = re.sub(r'[.,!?;:\-]+$', '', word_lower)
             
-            # Разговорные реплики Алисы
-            "приветствую": "привЕтствую",
-            "здравствуй": "здрАвствуй",
-            "здравствуйте": "здрАвствуйте",
-            "слушаю": "слУшаю",
-            "понимаю": "панимАю",
-            "извини": "извинИ",
-            "прости": "прастИ",
-            "поняла": "панялА",
-            "сделаю": "сдЕлаю",
-            "помогу": "памагУ",
-            "хочешь": "хОчишь",
-            "можешь": "мОжишь",
-            "рассказать": "расказать",
-            "думаю": "дУмаю",
-            "знаю": "знАю",
-            "хочу": "хачУ",
-            "давай": "давАй",
-            "вместе": "вмЕсти",
-            "человек": "чилавек",
-            "сказать": "сказать",
-            "говорить": "гаварИть",
-            "слушать": "слУшать",
-            "спросить": "спрасИть",
-            "расскажи": "раскажИ",
-            "покажи": "пакажИ",
-            "сделай": "сдЕлай",
-            "напиши": "напишИ",
-            "найди": "найдИ",
-            "открой": "аткрОй",
-            "закрой": "закрОй",
-            "запусти": "запустИ",
-            "останови": "астанавИ"
-        }
-        
-        # Набор русских гласных букв
-        self.vowels = set("аоуыэеёиюяАОУЫЭЕЁИЮЯ")
-        self.vowels_lower = set("аоуыэеёиюя")
-
-    def convert_plus_to_caps(self, text: str) -> str:
-        """
-        Преобразует знак плюса перед ударной гласной в капитализацию.
-        Например: "прив+ет" -> "привЕт"
-        """
-        pattern = r"\+([аоуыэеёиюяАОУЫЭЕЁИЮЯ])"
-        return re.sub(pattern, lambda m: m.group(1).upper(), text)
-
-    def get_heuristic_stress_index(self, word_lower: str, vowel_indices: list) -> int:
-        """
-        Эвристическое определение ударного слога в неизвестном русском слове.
-        """
-        # 1. Если есть буква 'ё', ударение всегда на неё
-        for idx in vowel_indices:
-            if word_lower[idx] == 'ё':
-                return idx
-        
-        num_vowels = len(vowel_indices)
-        if num_vowels == 0:
-            return -1
-        if num_vowels == 1:
-            return vowel_indices[0]
-            
-        # 2. Статистическая эвристика для русского языка:
-        # Для двух слогов: чаще всего ударение на первый (например, мАма, рАма, кОшка)
-        if num_vowels == 2:
-            return vowel_indices[0]
-        # Для трех и более слогов: чаще всего на предпоследний слог
-        else:
-            return vowel_indices[num_vowels - 2]
-
-    def reduce_and_stress_word(self, word: str, context_words: list = None) -> str:
-        """
-        Применяет правила акцентуации, клитик, контекстных омографов,
-        морфологических суффиксов и редукции безударных гласных к одному слову.
-        """
-        # Сначала преобразуем явные маркеры с плюсом
-        word = self.convert_plus_to_caps(word)
-        
-        # Проверяем, есть ли уже явно выделенная заглавная гласная (ручное ударение)
-        has_stressed = any(char.isupper() and char.lower() in self.vowels_lower for char in word)
-        
-        word_lower = word.lower()
-        
-        # 1. Если слово является клитикой (короткий предлог или союз), не ставим ударение
-        if word_lower in self.clitics:
-            reduced_clitic = []
-            for char in word:
-                if char.lower() == 'о':
-                    reduced_clitic.append('а' if char.islower() else 'А')
+            if word_clean in self.CLITICS:
+                # Превращаем всё слово в lowercase (убираем ударение),
+                # но сохраняем первую заглавную если слово стоит в начале предложения
+                if result:  # Не первое слово — просто lowercase
+                    result.append(word.lower())
                 else:
-                    reduced_clitic.append(char)
-            return "".join(reduced_clitic)
-            
-        # 2. Контекстный анализ омографов!
-        if word_lower in self.homographs and context_words:
-            homo_data = self.homographs[word_lower]
-            matched = False
-            for variant_name, context_set in homo_data["contexts"].items():
-                if any(ctx_w in context_words for ctx_w in context_set):
-                    res_word = homo_data["stressed_variants"][variant_name]
-                    matched = True
-                    break
-            if not matched:
-                res_word = homo_data["default"]
-                
-            if word[0].isupper() and len(word) > 1 and not word[1].isupper():
-                return res_word[0].upper() + res_word[1:]
-            return res_word
-            
-        # 3. Ищем слово в орфоэпическом словаре
-        if word_lower in self.stress_db:
-            res_word = self.stress_db[word_lower]
-            if word[0].isupper() and len(word) > 1 and not word[1].isupper():
-                return res_word[0].upper() + res_word[1:]
-            return res_word
-            
-        # Находим индексы всех гласных в слове
-        vowel_indices = [i for i, char in enumerate(word_lower) if char in self.vowels_lower]
-        
-        # 4. Если слово односложное (ровно 1 гласная), ставим ударение на неё
-        if len(vowel_indices) == 1:
-            idx = vowel_indices[0]
-            stressed_char = word_lower[idx].upper()
-            res_word = word_lower[:idx] + stressed_char + word_lower[idx+1:]
-            if word[0].isupper() and idx > 0:
-                res_word = res_word[0].upper() + res_word[1:]
-            return res_word
-
-        # 5. Если в слове есть 'ё' или 'Ё', и нет других ударений, ставим ударение на неё автоматически
-        if 'ё' in word_lower and not has_stressed:
-            yo_idx = word_lower.find('ё')
-            word = word[:yo_idx] + 'Ё' + word[yo_idx+1:]
-            has_stressed = True
-
-        # 6. Умные морфологические эвристики для неизвестных слов!
-        if not has_stressed and len(vowel_indices) > 0:
-            # А. Суффиксы -ость / -ости / -остью (например, скОрость, рАдость)
-            if word_lower.endswith(("ость", "ости", "остью", "остей")):
-                prev_vowels = [idx for idx in vowel_indices if idx < word_lower.rfind("ость")]
-                if prev_vowels:
-                    stress_idx = prev_vowels[-1]
-                else:
-                    stress_idx = vowel_indices[0]
-                word = word[:stress_idx] + word[stress_idx].upper() + word[stress_idx+1:]
-                has_stressed = True
-                
-            # Б. Суффиксы -ение / -ения / -ением (например, решЕние, движЕние)
-            elif word_lower.endswith(("ение", "ения", "ением", "ениями", "ениях")):
-                e_idx = word_lower.rfind("ение")
-                word = word[:e_idx] + 'Е' + word[e_idx+1:]
-                has_stressed = True
-                
-            # В. Глаголы на -ировать (например, акцентировать, блокировать)
-            elif word_lower.endswith(("ировать", "ирует", "ируют", "ировал", "ировала", "ировали")):
-                i_idx = word_lower.rfind("ир")
-                word = word[:i_idx] + 'И' + word[i_idx+1:]
-                has_stressed = True
-
-            # Г. Глаголы на -ить, -ишь, -ит (например, говорИть, звонИт, положИл)
-            elif word_lower.endswith(("ить", "ишь", "ит", "им", "ите", "ило", "ила", "или")) and len(vowel_indices) > 1:
-                i_idx = word_lower.rfind("и")
-                word = word[:i_idx] + 'И' + word[i_idx+1:]
-                has_stressed = True
-
-        # 7. Если ударения ещё нет, применяем эвристический поиск ударной гласной
-        if not has_stressed and len(vowel_indices) > 0:
-            stress_idx = self.get_heuristic_stress_index(word_lower, vowel_indices)
-            if stress_idx != -1:
-                word = word[:stress_idx] + word[stress_idx].upper() + word[stress_idx+1:]
-                has_stressed = True
-
-        # 8. Применяем качественную безударную редукцию О -> А для всех безударных 'о'
-        reduced = []
-        for i, char in enumerate(word):
-            if char.lower() == 'о':
-                if not char.isupper():
-                    reduced.append('а')
-                else:
-                    reduced.append(char)
+                    # Первое слово — сохраняем заглавную первую букву
+                    lowered = word.lower()
+                    result.append(lowered[0].upper() + lowered[1:] if len(lowered) > 1 else lowered.upper())
             else:
-                reduced.append(char)
+                result.append(word)
+        
+        return ' '.join(result)
+
+    def _inflect_number(self, num_str: str, target_case: str) -> str:
+        words = num_str.split()
+        res = []
+        for w in words:
+            # Ручной фикс для "сто" в косвенных падежах
+            if w == "сто" and target_case in ['gent', 'datv', 'ablt', 'loct']:
+                res.append("ста")
+                continue
+            
+            p = self.morph.parse(w)[0]
+            try:
+                inf = p.inflect({target_case})
+                res.append(inf.word if inf else w)
+            except:
+                res.append(w)
+        return " ".join(res)
+
+    def _process_numbers(self, text: str) -> str:
+        # Ищем числа с контекстом (предлог слева, существительное справа)
+        # Например: "от 150000 рублей", "к 5 часам"
+        def repl(m):
+            prefix = m.group(1) # e.g. "от "
+            num = int(m.group(2))
+            suffix = m.group(3) # e.g. " рублей"
+            
+            target_case = 'nomn'
+            
+            if prefix:
+                prep = prefix.strip().lower()
+                if prep in ['от', 'до', 'из', 'у', 'без', 'для', 'около', 'с', 'около', 'более', 'менее']:
+                    target_case = 'gent'
+                elif prep in ['к', 'по']:
+                    target_case = 'datv'
+                elif prep in ['в', 'на', 'за', 'про', 'через']:
+                    target_case = 'accs'
+                elif prep in ['с', 'над', 'под', 'перед']:
+                    target_case = 'ablt'
+                elif prep in ['о', 'об', 'при']:
+                    target_case = 'loct'
+            
+            if target_case == 'nomn' and suffix:
+                suf_word = suffix.strip().lower()
+                p = self.morph.parse(suf_word)[0]
+                if p.tag.case:
+                    target_case = p.tag.case
+                    
+            nom_str = num2words(num, lang='ru')
+            if target_case != 'nomn':
+                nom_str = self._inflect_number(nom_str, target_case)
                 
-        return "".join(reduced)
+            return (prefix or "") + nom_str + (suffix or "")
+
+        return re.sub(r'([а-яА-ЯёЁ]+\s+)?\b(\d+)\b(\s+[а-яА-ЯёЁ]+)?', repl, text)
 
     def apply_rules(self, text: str) -> str:
         """
-        Применяет правила нормализации, раскрытия сокращений и орфоэпии ко всему тексту.
-        С поддержкой интеллектуального контекстного омограф-анализатора.
+        Применяет ML-правила нормализации и орфоэпии ко всему тексту.
+        Автоматически расставляет знак плюса '+' перед ударной гласной (формат Supertonic).
         """
         if not text:
             return ""
             
+        # Обработка чисел перед ML-акцентуацией
+        text = self._process_numbers(text)
+        
+        # Заменяем распространенные сокращения до обработки
         replacements = {
             r"\bт\.д\.": "так дАлее",
             r"\bт\.п\.": "тому подОбное",
@@ -375,24 +150,95 @@ class RussianTTSPreprocessor:
             r"\bруб\.": "рублЕй",
             r"\bтыс\.": "тЫсяч",
             r"\bмлн\.": "миллиОнов",
+            r"\bООО\b": "о-о-о",
+            r"\bТК РФ\b": "тэ-к+а эр-+эф",
+            r"\bТК\b": "тэ-к+а",
+            r"\bРФ\b": "эр-+эф",
+            r"\bHR\b": "эйч-+ар",
+            r"\bIT\b": "айт+и",
+            r"\bFrontend\b": "фронт+энд",
+            r"\bBackend\b": "бэк+энд",
+            r"\bMiddle\b": "м+идл",
+            r"\bSenior\b": "сень+ор",
+            r"\bJunior\b": "дж+униор",
         }
         for pattern, rep in replacements.items():
             text = re.sub(pattern, rep, text, flags=re.IGNORECASE)
 
-        # Выделяем все слова для создания контекста предложения
-        all_words = re.findall(r"\b[а-яА-ЯёЁa-zA-Z\+]+\b", text)
-        context_words = [w.lower() for w in all_words]
+        # Удаляем markdown-разметку, иероглифы и любые нестандартные символы
+        # Оставляем только буквы, цифры и базовую пунктуацию
+        text = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9.,!?—\-\s"\'«»:;]', '', text)
+        
+        # Разговорная фонетика: заменяем книжные слова на их произносимые варианты
+        phonetic_replacements = {
+            r"\bсегодня\b": "севодня",
+            r"\bСегодня\b": "Севодня",
+            r"\bсегодняшний\b": "севодняшний",
+            r"\bСегодняшний\b": "Севодняшний",
+            r"\bпожалуйста\b": "пожалуста",
+            r"\bПожалуйста\b": "Пожалуста",
+            r"\bздравствуйте\b": "здраствуйте",
+            r"\bЗдравствуйте\b": "Здраствуйте",
+            r"\bздравствуй\b": "здраствуй",
+            r"\bЗдравствуй\b": "Здраствуй",
+            r"\bчувство\b": "чуство",
+            r"\bЧувство\b": "Чуство",
+            r"\bчувствовать\b": "чуствовать",
+            r"\bЧувствовать\b": "Чуствовать",
+        }
+        for pattern, rep in phonetic_replacements.items():
+            text = re.sub(pattern, rep, text)
+            
+        # [CRITICAL FIX] ruaccent не ставит ударения на слова с буквой Ё (возвращает без ударения).
+        # Поэтому мы заменяем Ё на Е до передачи в ML-акцентуатор.
+        text = text.replace('Ё', 'Е').replace('ё', 'е')
+        
+        # Запускаем ML-процессор
+        # process_all() обрабатывает весь текст с учетом контекста
+        processed = self.accentizer.process_all(text)
+        
+        # G2P (Истинная фонетическая транскрипция)
+        # -тся / -ться -> ца
+        processed = re.sub(r'тс\+?[яЯ]\b', 'ца', processed)
+        processed = re.sub(r'тьс\+?[яЯ]\b', 'ца', processed)
+        
+        # -ого / -его -> ово / ево
+        def ogo_replacer(match):
+            word = match.group(0)
+            word_lower = word.lower().replace('+', '')
+            exceptions = {'много', 'немного', 'строго', 'итого', 'дорого', 'недорого', 'лого', 'педагого'}
+            if word_lower in exceptions:
+                return word
+            return match.group(1) + match.group(2) + ('в' if match.group(3).lower() == 'г' else 'В') + match.group(4)
 
-        # Выделяем слова, знаки препинания и пробелы
-        tokens = re.split(r"([а-яА-ЯёЁa-zA-Z\+]+)", text)
-        processed_tokens = []
-        for token in tokens:
-            if re.match(r"^[а-яА-ЯёЁa-zA-Z\+]+$", token):
-                processed_tokens.append(self.reduce_and_stress_word(token, context_words))
-            else:
-                processed_tokens.append(token)
-                
-        processed = "".join(processed_tokens)
+        processed = re.sub(r'\b([А-Яа-яЁё+]*?)([оеОЕ]\+?)([гГ])([оО])\b', ogo_replacer, processed)
+        
+        # что -> што
+        processed = re.sub(r'\b([чЧ])(т\+?[оО])\b', lambda m: ('ш' if m.group(1) == 'ч' else 'Ш') + m.group(2), processed)
+        processed = re.sub(r'\b([чЧ])(т\+?[оО]б)', lambda m: ('ш' if m.group(1) == 'ч' else 'Ш') + m.group(2), processed)
+        
+        # конечно -> конешно
+        processed = re.sub(r'\b([кК]он\+?[еЕ]ч)(н\+?[оО])\b', lambda m: m.group(1)[:-1] + ('ш' if m.group(1)[-1] == 'ч' else 'Ш') + m.group(2), processed)
+        processed = re.sub(r'\b([сС]к\+?[уУ]ч)(н\+?[оО])\b', lambda m: m.group(1)[:-1] + ('ш' if m.group(1)[-1] == 'ч' else 'Ш') + m.group(2), processed)
+        
+        # Паузы: преобразуем тире в запятые для дыхания
+        processed = processed.replace(' — ', ', ')
+        processed = processed.replace('...', ', ')
+
+        # Конвертация знака '+' от ruaccent в UPPERCASE гласную
+        # (за+мок -> зАмок). Supertonic различает lowercase/uppercase индексы.
+        processed = re.sub(r'\+([а-яёА-ЯЁ])', lambda m: m.group(1).upper(), processed)
+        
+        # [CRITICAL FIX] На всякий случай заменяем Ё→Е еще раз, 
+        # хотя они должны были быть заменены до вызова ruaccent.
+        # Supertonic 3 не поддерживает букву Ё (unicode_indexer[0x451] == -1).
+        # Если оставить Ё, модель получит unknown-символ и сгенерирует артефакт.
+        processed = processed.replace('Ё', 'Е').replace('ё', 'е')
+        
+        # [PROSODY FIX] Деакцентуация клитик для естественной просодии.
+        # ruaccent ставит ударения на ВСЕ слова, включая предлоги и частицы.
+        # В естественной речи они безударны. Убираем uppercase у служебных слов.
+        processed = self._deaccentuate_clitics(processed)
         
         # Очистка лишних пробелов
         processed = re.sub(r"\s+", " ", processed).strip()
@@ -408,12 +254,17 @@ if __name__ == "__main__":
         "Огромный замок закрыт на замок.",
         "Она принесла зелёный торт и своё красивое платье.",
         "Это очень сложная задача, но мы справимся за пять минут.",
-        "Попробуем ручное ударение через плюс: за+мок или зам+ок.",
         "Сколько стоит эта книга? А книга стоит на полке.",
         "У нас есть географический атлас. Это платье сшито из ткани атлас.",
-        "Я плачу деньги за аренду. Я плачу от грусти."
+        "Я плачу деньги за аренду. Я плачу от грусти.",
+        "Позвоните мне, когда будете готовы.",
+        "Добро пожаловать в наш магазин!",
+        "Мы решили пойти в кино вечером.",
+        "Она купила новое платье для вечеринки.",
     ]
     for case in test_cases:
-        print("Оригинал:", case)
-        print("Фонетика:", prep.apply_rules(case))
-        print("-" * 50)
+        result = prep.apply_rules(case)
+        has_yo = 'ё' in result or 'Ё' in result
+        print(f"Вход:  {case}")
+        print(f"Выход: {result}  {'⚠️ СОДЕРЖИТ Ё!' if has_yo else '✅'}")
+        print("-" * 60)

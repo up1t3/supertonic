@@ -13,6 +13,7 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "faster-whisper>=1.2.1",
     "python-multipart>=0.0.29",
+    "ruaccent>=1.5.8.3",
 ]
 
 [tool.setuptools]
